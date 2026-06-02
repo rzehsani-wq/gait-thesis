@@ -10,12 +10,17 @@ This codebase implements:
 
 ## Structure
 
-src/
-├── datasets/       # CASIA-B and DenseGait dataset loaders
-├── models/         # Transformer backbone, ID head, ArcFace head
-├── train/          # SSL pretraining and supervised fine-tuning scripts
-├── utils/          # Pose normalization, region partitioning, parsing, logging
-└── data/           # Pose augmentation transforms
+    src/
+
+        ├── datasets/       # CASIA-B and DenseGait dataset loaders
+
+        ├── models/         # Transformer backbone, ID head, ArcFace head
+
+        ├── train/          # SSL pretraining and supervised fine-tuning scripts
+
+        ├── utils/          # Pose normalization, region partitioning, parsing, logging
+
+        └── data/           # Pose augmentation transforms
 
 ## Setup
 
