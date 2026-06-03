@@ -1,0 +1,57 @@
+Folder PATH listing for volume Windows-SSD
+Volume serial number is 000000BE 1CCF:6E77
+C:.
+¦   .gitattributes
+¦   .gitignore
+¦   preprocessing_validation.md
+¦   README.md
+¦   requirements.txt
+¦   THESIS_CONTEXT.md
+¦   tree.txt
+¦   
++---analysis
+¦   ¦   collect_runs.py
+¦   ¦   
+¦   +---notebooks
+¦           01-baseline_results.ipynb
+¦           
++---scripts
+¦       run_matrix.sh
+¦       
++---src
+    ¦   smoke_test.py
+    ¦   __init__.py
+    ¦   
+    +---configs
+    ¦       casia_b.yaml
+    ¦       
+    +---data
+    ¦       pose_augs.py
+    ¦       __init__.py
+    ¦       
+    +---datasets
+    ¦       dataset.py
+    ¦       densegait_dataset.py
+    ¦       ssl_dataset.py
+    ¦       __init__.py
+    ¦       
+    +---models
+    ¦       id_model.py
+    ¦       metric_head.py
+    ¦       model_ssl.py
+    ¦       __init__.py
+    ¦       
+    +---train
+    ¦       train_id.py
+    ¦       train_ssl.py
+    ¦       __init__.py
+    ¦       
+    +---utils
+            casia_parsing.py
+            logger.py
+            mask_utils.py
+            metrics.py
+            pose_norm.py
+            seed.py
+            __init__.py
+            

@@ -51,7 +51,10 @@ def build_base_dataset(args):
     return ds
 
 
-def train_one_epoch(model, loader, optim, device, scaler, use_amp: bool, log_every: int = 50):
+def train_one_epoch(model, loader, optim, device, scaler, use_amp,
+                    log_every=50, save_every_steps=500,
+                    resume_step=0, save_path=None, epoch=1,
+                    best_loss=float("inf"), global_step=0):
     model.train()
     total_loss = 0.0
     total_steps = 0
@@ -60,13 +63,13 @@ def train_one_epoch(model, loader, optim, device, scaler, use_amp: bool, log_eve
     for step, batch in enumerate(loader):
         x = batch["input"].to(device, non_blocking=True)        # (B, L, 17, 2)
         y = batch["target"].to(device, non_blocking=True)       # (B, L, 17, 2)
-        m = batch["mask"].to(device, non_blocking=True)     # (B, L, 17) bool
+        m = batch["mask"].to(device, non_blocking=True)         # (B, L, 17) bool
 
         if use_amp and device.type == "cuda":
             with torch.amp.autocast("cuda"):
-                pred = model(x)     # (B, L, 17, 2)
-                diff_sq = (pred - y) ** 2       # (B, L, 17, 2)
-                mask_f = m.unsqueeze(-1).float()        # (B, L, 17, 1)
+                pred = model(x)
+                diff_sq = (pred - y) ** 2
+                mask_f = m.unsqueeze(-1).float()
                 denom = mask_f.sum().clamp_min(1.0)
                 loss = (diff_sq * mask_f).sum() / denom / 2.0
             optim.zero_grad(set_to_none=True)
@@ -88,7 +91,25 @@ def train_one_epoch(model, loader, optim, device, scaler, use_amp: bool, log_eve
 
         total_loss += float(loss.item())
         total_steps += 1
+        global_step += 1
 
+        # Skip steps already completed in a resumed epoch
+        if global_step <= resume_step:
+            continue
+
+        # Mid-epoch checkpoint to Drive
+        if save_path and global_step % save_every_steps == 0:
+            ck = {
+                "model": model.state_dict(),
+                "optim": optim.state_dict(),
+                "epoch": epoch,
+                "global_step": global_step,
+                "best_loss": best_loss,
+            }
+            torch.save(ck, save_path.replace(".pt", "_resume.pt"))
+            print(f"  [resume-ckpt] saved at global_step={global_step}")
+
+        # Logging
         if (step + 1) % log_every == 0:
             elapsed = time.time() - t0
             avg = total_loss / total_steps
@@ -96,8 +117,7 @@ def train_one_epoch(model, loader, optim, device, scaler, use_amp: bool, log_eve
                   f"loss={loss.item():.5f}  avg={avg:.5f}  "
                   f"elapsed={elapsed:.1f}s")
 
-    return total_loss / max(1, total_steps)
-
+    return total_loss / max(1, total_steps), global_step
 
 def main():
     ap = argparse.ArgumentParser()
@@ -109,14 +129,11 @@ def main():
     ap.add_argument("--conf_thr", type=float, default=0.5)
     ap.add_argument("--limit_rows", type=int, default=None)
     ap.add_argument("--limit_files", type=int, default=None)
-
     ap.add_argument("--mask_ratio", type=float, default=0.35)
-
     ap.add_argument("--d_model", type=int, default=128)
     ap.add_argument("--nhead", type=int, default=4)
     ap.add_argument("--depth_pairs", type=int, default=2)
     ap.add_argument("--dropout", type=float, default=0.1)
-
     ap.add_argument("--epochs", type=int, default=50)
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--lr", type=float, default=3e-4)
@@ -156,15 +173,39 @@ def main():
     os.makedirs(os.path.dirname(args.save) or ".", exist_ok=True)
     best_loss = float("inf")
 
-    for epoch in range(1, args.epochs + 1):
+    # Resume state
+    start_epoch = 1
+    global_step = 0
+    resume_path = args.save.replace(".pt", "_resume.pt")
+
+    if os.path.exists(resume_path):
+        print(f"[ssl] Resuming from {resume_path}")
+        ck = torch.load(resume_path, map_location=device)
+        model.load_state_dict(ck["model"])
+        optim.load_state_dict(ck["optim"])
+        start_epoch = ck["epoch"]
+        global_step = ck["global_step"]
+        resume_step = ck["global_step"]
+        best_loss   = ck["best_loss"]
+        print(f"[ssl] Resumed at epoch {start_epoch}, step {global_step}, best_loss={best_loss:.5f}")
+    else:
+        resume_step = 0
+
+    for epoch in range(start_epoch, args.epochs + 1):
         print(f"\n=== Epoch {epoch}/{args.epochs} ===")
-        epoch_loss = train_one_epoch(
+        epoch_loss, global_step = train_one_epoch(
             model, loader, optim, device, scaler,
             use_amp=bool(args.amp),
+            save_every_steps=500,
+            resume_step=resume_step if epoch == start_epoch else 0,
+            save_path=args.save,
+            epoch=epoch,
+            best_loss=best_loss,
+            global_step=global_step,
         )
         print(f"[ssl] epoch {epoch:3d}  avg_loss={epoch_loss:.5f}")
 
-        # Save
+        # Save end-of-epoch checkpoint
         if epoch % args.save_every == 0 or epoch == args.epochs or epoch_loss < best_loss:
             ck = {
                 "model": model.state_dict(),
