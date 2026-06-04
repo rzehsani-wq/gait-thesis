@@ -182,7 +182,8 @@ def main():
         print(f"[ssl] Resuming from {resume_path}")
         ck = torch.load(resume_path, map_location=device)
         model.load_state_dict(ck["model"])
-        optim.load_state_dict(ck["optim"])
+        if ck["optim"] is not None:
+            optim.load_state_dict(ck["optim"])
         start_epoch = ck["epoch"]
         global_step = ck["global_step"]
         resume_step = ck["global_step"]
