@@ -232,7 +232,7 @@ backbone for the unmatched keys and its results are not interpretable.
    Result: ArcFace scale jumps to full value immediately after warmup ends 
    instead of ramping linearly. Causes a loss spike from ~4.6 to ~7.8. 
    Models recover but lose some efficiency. One-line fix; apply when 
-   convenient.
+   convenient. ---> It's already applied (replaced with `steps_after_warm = step - int(args.warmup_steps) if use_warmup else step`), so the code is updated but still it spikes!
 
 2. **`acc=0.000` during ArcFace phase**: Normal. The angular margin makes 
    correct classification harder by design. Watch `val_top1` instead.
