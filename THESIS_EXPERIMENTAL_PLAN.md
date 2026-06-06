@@ -220,3 +220,19 @@ Examples:
 ## On the strict-load check
 
 `load_ssl_backbone` now refuses partial loads. Every run should print:
+   `[ckpt] loaded <path>: 58/58 keys (strict OK)`
+If you see anything else (especially "STRICT LOAD FAILED" or "WARNING: 
+proceeding with partial load"), STOP — that run is loading a random-init 
+backbone for the unmatched keys and its results are not interpretable.
+
+## Known issues
+
+1. **ArcFace ramp bug** (train_id.py line 952): `steps_after_warm` is 
+   computed as `args.steps - warmup_left` instead of `step - args.warmup_steps`. 
+   Result: ArcFace scale jumps to full value immediately after warmup ends 
+   instead of ramping linearly. Causes a loss spike from ~4.6 to ~7.8. 
+   Models recover but lose some efficiency. One-line fix; apply when 
+   convenient.
+
+2. **`acc=0.000` during ArcFace phase**: Normal. The angular margin makes 
+   correct classification harder by design. Watch `val_top1` instead.
