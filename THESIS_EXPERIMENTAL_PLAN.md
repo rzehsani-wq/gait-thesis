@@ -49,8 +49,8 @@ seq_len means the model operates outside its trained range. KEEP seq_len = 56
 during fine-tuning.
 
 Current checkpoints:
-- `ssl_casia_v2.pt`: 50 epochs (TO BE TRAINED if not yet done)
-- `ssl_densegait_v2.pt`: 20 epochs (final reconstruction loss 0.0027)
+- `ssl_casia.pt`: 50 epochs (TO BE TRAINED if not yet done)
+- `ssl_densegait.pt`: 20 epochs (final reconstruction loss 0.0027)
 
 ## Fine-tuning conventions
 

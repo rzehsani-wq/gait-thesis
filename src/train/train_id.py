@@ -949,7 +949,7 @@ def run_training(args, device):
             else:
                 # linear ramp from min -> target across arc_s_warm steps
                 # start ramping the moment warmup ends
-                steps_after_warm = (args.steps - warmup_left) if use_warmup else step
+                steps_after_warm = step - int(args.warmup_steps) if use_warmup else step
                 ramp_t = min(1.0, max(0.0, steps_after_warm / max(1, arc_s_warm)))
                 metric.s = arc_s_min + (arc_s_target - arc_s_min) * ramp_t
         with autocast_ctx():
