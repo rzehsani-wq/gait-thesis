@@ -38,14 +38,14 @@ class MaskedJointSSL(Dataset):
         full = s["xy"]      # (L, 17, 2)
         L, J, _ = full.shape
 
-        # Random boolean mask over (L, J) positions
+        # Sampling a random boolean mask over (L, J) positions with probability 0.35
         mask = torch.rand(L, J) < self.mask_ratio
         # Ensure at least one position is masked (so loss isn't NaN)
         if not mask.any():
             mask[0, 0] = True
 
         masked = full.clone()
-        masked[mask] = self.mask_value
+        masked[mask] = self.mask_value 
 
         return {
             "folder": s.get("folder", ""),

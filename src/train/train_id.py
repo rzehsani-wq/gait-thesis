@@ -38,8 +38,9 @@ from src.utils.seed import set_seed
 from src.utils.metrics import accuracy_topk
 from src.utils.logger import append_csv, dump_json
 from src.data.pose_augs import Compose, TemporalDropout, RandomJointMask, RandomUpperBodyWiden
-from src.utils.casia_parsing import parse_cond_from_folder, parse_subject_from_folder, parse_view_from_folder
+from src.utils.casia_parsing import parse_cond_from_folder, parse_subject_from_folder, parse_view_from_folder, parse_seq_num_from_folder
 from src.utils.mask_utils import REGIONS, REGION_JOINT_INDICES
+from src.datasets.splits import TRAIN_SUBJECTS, VAL_SUBJECTS, TEST_SUBJECTS
 
 # ---------- Utilities
 def ensure_dir(p: str):
@@ -58,6 +59,50 @@ def _parse_cond_list(s: Optional[str]) -> Optional[List[str]]:
         if token:
             parts.append(token)
     return parts if parts else None
+
+
+# ---------- Sequence-disjoint gallery/probe masks (Butler Item 3)
+# CASIA-B nm sequences 1-4 are gallery, 5-6 are probe.
+# For nm->bg / nm->cl the conditions are already disjoint, but we restrict
+# the nm gallery to seqs 1-4 for consistency with the standard protocol.
+GALLERY_NM_SEQS = frozenset({1, 2, 3, 4})
+PROBE_NM_SEQS   = frozenset({5, 6})
+
+
+def _build_gal_probe_masks(conds, folders, gallery_cond, probe_cond):
+    """Return (gal_mask, pr_mask) boolean arrays with sequence-disjoint enforcement.
+
+    - nm gallery windows are restricted to sequences 1-4.
+    - nm probe  windows are restricted to sequences 5-6.
+    - bg / cl windows are unrestricted (they are already separate sequences).
+    """
+    conds_arr = np.array(conds)
+    seq_nums = np.array([parse_seq_num_from_folder(f) for f in folders])
+
+    gal_targets = _parse_cond_list(gallery_cond)
+    pr_targets  = _parse_cond_list(probe_cond)
+
+    # --- gallery mask ---
+    if gal_targets is None:
+        gal_mask = np.ones(len(conds_arr), dtype=bool)
+    else:
+        gal_mask = np.isin(conds_arr, gal_targets)
+    # restrict nm gallery to seqs 1-4
+    nm_gal = (conds_arr == "nm") & gal_mask
+    if nm_gal.any():
+        gal_mask[nm_gal] = np.isin(seq_nums[nm_gal], list(GALLERY_NM_SEQS))
+
+    # --- probe mask ---
+    if pr_targets is None:
+        pr_mask = np.ones(len(conds_arr), dtype=bool)
+    else:
+        pr_mask = np.isin(conds_arr, pr_targets)
+    # restrict nm probe to seqs 5-6
+    nm_pr = (conds_arr == "nm") & pr_mask
+    if nm_pr.any():
+        pr_mask[nm_pr] = np.isin(seq_nums[nm_pr], list(PROBE_NM_SEQS))
+
+    return gal_mask, pr_mask
 
 
 def _inspect_labelmap(train_loader, val_loader, num_classes):
@@ -169,26 +214,30 @@ def build_id_loaders(
             s = parse_subject_from_folder(base[i]["folder"])
             subject_to_indices[s].append(i)
 
-    subjects = sorted([s for s, idxs in subject_to_indices.items()
-                       if len(idxs) >= min_clips_per_subject])
-    if not subjects:
-        raise ValueError("No subjects meet min_clips_per_subject.")
-    if limit_subjects and 0 < limit_subjects < len(subjects):
-        subjects = subjects[:limit_subjects]
-
     rng = np.random.RandomState(seed)
 
-    train_idx, val_idx = [], []
+    train_idx, val_idx, test_idx = [], [], []
     sm = split_mode.lower()
     if sm == "subject":
-        n_val_subj = max(1, int(round(len(subjects) * val_frac))) if val_frac > 0 else 1
-        if len(subjects) <= n_val_subj:
-            train_subjects = subjects[:1]
-            val_subjects = subjects[1:2] if len(subjects) > 1 else subjects[:1]
-        else:
-            rng.shuffle(subjects)
-            train_subjects = subjects[n_val_subj:]
-            val_subjects = subjects[:n_val_subj]
+        # --- Hardcoded three-way split (Butler Item 1) ---
+        train_subjects = sorted(s for s in TRAIN_SUBJECTS if s in subject_to_indices
+                                and len(subject_to_indices[s]) >= min_clips_per_subject)
+        val_subjects   = sorted(s for s in VAL_SUBJECTS   if s in subject_to_indices
+                                and len(subject_to_indices[s]) >= min_clips_per_subject)
+        test_subjects  = sorted(s for s in TEST_SUBJECTS  if s in subject_to_indices
+                                and len(subject_to_indices[s]) >= min_clips_per_subject)
+
+        # Disjointness assertion
+        all_used = set(train_subjects) | set(val_subjects) | set(test_subjects)
+        assert set(train_subjects).isdisjoint(val_subjects), "Train/val subject overlap"
+        assert set(train_subjects).isdisjoint(test_subjects), "Train/test subject overlap"
+        assert set(val_subjects).isdisjoint(test_subjects), "Val/test subject overlap"
+
+        print(f"[split] train={len(train_subjects)} val={len(val_subjects)} test={len(test_subjects)} subjects")
+        print(f"[split] train_subjects={train_subjects}")
+        print(f"[split] val_subjects={val_subjects}")
+        print(f"[split] test_subjects={test_subjects}")
+
         for s in train_subjects:
             idxs = np.array(subject_to_indices[s], dtype=int)
             rng.shuffle(idxs)
@@ -201,9 +250,19 @@ def build_id_loaders(
             if limit_per_subject and limit_per_subject > 0:
                 idxs = idxs[:limit_per_subject]
             val_idx.extend(idxs.tolist())
-            
-        subject_to_label = {s: i for i, s in enumerate(sorted(subjects))}
+        for s in test_subjects:
+            idxs = np.array(subject_to_indices[s], dtype=int)
+            rng.shuffle(idxs)
+            if limit_per_subject and limit_per_subject > 0:
+                idxs = idxs[:limit_per_subject]
+            test_idx.extend(idxs.tolist())
+
+        subjects = sorted(set(train_subjects) | set(val_subjects) | set(test_subjects))
+        subject_to_label = {s: i for i, s in enumerate(subjects)}
+
     elif sm == "clip":
+        subjects = sorted([s for s, idxs in subject_to_indices.items()
+                           if len(idxs) >= min_clips_per_subject])
         for s in subjects:
             idxs = np.array(subject_to_indices[s], dtype=int)
             rng.shuffle(idxs)
@@ -235,7 +294,15 @@ def build_id_loaders(
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0, drop_last=False)
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=0, drop_last=False)
-    return train_loader, val_loader, len(subject_to_label)
+
+    # Test loader (only for subject split; clip split has no held-out test set)
+    test_loader = None
+    if sm == "subject" and len(test_idx) > 0:
+        test_ds = IDRegionDataset(Subset(base, test_idx), subject_to_label,
+                                  region=region, pose_aug=None, is_train=False)
+        test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=0, drop_last=False)
+
+    return train_loader, val_loader, test_loader, len(subject_to_label)
 
 # ---------- Forward region/fusion
 def _forward_region(backbone, batch: Dict[str, Any], device,
@@ -253,7 +320,7 @@ def _forward_region(backbone, batch: Dict[str, Any], device,
 @torch.no_grad()
 def extract_features_with_meta(backbone, dl, device, region: str, fusion: str,
                                l2norm: bool = True, featurizer=None):
-    feats, labels, conds, views = [], [], [], []
+    feats, labels, conds, views, folders = [], [], [], [], []
     backbone.eval()
     for b in dl:
         y = b["y"].to(device, dtype=torch.long)
@@ -266,11 +333,12 @@ def extract_features_with_meta(backbone, dl, device, region: str, fusion: str,
         labels.append(y.cpu())
         conds.extend(list(b["cond"]))
         views.extend([int(v) for v in b["view"]])
+        folders.extend(list(b["folder"]))
     backbone.train()
     X = torch.cat(feats, dim=0)
     y = torch.cat(labels, dim=0)
     views_t = torch.tensor(views, dtype=torch.int64)
-    return X, y, conds, views_t
+    return X, y, conds, views_t, folders
 
 import json
 
@@ -294,23 +362,16 @@ def _dump_features_npz(X, y, conds, views, folders, ymap, out_npz):
             w.writerow([i, int(y[i].item()), inv.get(int(y[i].item()), f"subj_{int(y[i].item())}"),
                         conds[i], int(views[i].item()), folders[i]])
 
-def _materialize_knn_partition(X, y, conds, views, *, gallery_cond, probe_cond,
+def _materialize_knn_partition(X, y, conds, views, folders, *, gallery_cond, probe_cond,
                                view_match, gallery_per_subject, seed=0):
     # Reproduce the exact partitioning logic used by evaluate_knn()
     # Returns gallery_idx, probe_idx arrays that index rows of X/y/conds/views
-    conds = np.array(conds)
-    views = views.numpy().astype(int)
-    y_np  = y.numpy().astype(int)
+    conds_list = list(conds) if not isinstance(conds, list) else conds
+    conds_arr = np.array(conds_list)
+    views = views.numpy().astype(int) if hasattr(views, 'numpy') else np.asarray(views, dtype=int)
+    y_np  = y.numpy().astype(int) if hasattr(y, 'numpy') else np.asarray(y, dtype=int)
 
-    def _plist(s):
-        if s is None or (isinstance(s, str) and s.strip() == ""): return None
-        return [t.strip() for t in s.split(",") if t.strip()]
-
-    gal_targets = _plist(gallery_cond)
-    pr_targets  = _plist(probe_cond)
-
-    gal_mask = np.ones(len(conds), dtype=bool) if gal_targets is None else np.isin(conds, gal_targets)
-    pr_mask  = np.ones(len(conds), dtype=bool) if pr_targets  is None else np.isin(conds, pr_targets)
+    gal_mask, pr_mask = _build_gal_probe_masks(conds_list, folders, gallery_cond, probe_cond)
 
     gal_idx = np.where(gal_mask)[0]
     pr_idx  = np.where(pr_mask)[0]
@@ -415,7 +476,7 @@ def evaluate_knn(
     featurizer=None,
 ) -> Tuple[float, float]:
 
-    X_t, y_t, conds, views_t = extract_features_with_meta(
+    X_t, y_t, conds, views_t, folders = extract_features_with_meta(
         backbone, dl, device, region, fusion, l2norm=l2norm, featurizer=featurizer
     )
     X = X_t.cpu().numpy()
@@ -432,10 +493,7 @@ def evaluate_knn(
     if l2norm:
         X = _l2n(X)
 
-    gal_targets = _parse_cond_list(gallery_cond)
-    pr_targets  = _parse_cond_list(probe_cond)
-    gal_mask = np.ones(len(conds), dtype=bool) if gal_targets is None else np.isin(conds, gal_targets)
-    pr_mask  = np.ones(len(conds), dtype=bool) if pr_targets  is None else np.isin(conds, pr_targets)
+    gal_mask, pr_mask = _build_gal_probe_masks(conds, folders, gallery_cond, probe_cond)
     X_gal, y_gal, v_gal = X[gal_mask], y[gal_mask], views[gal_mask]
     X_pr,  y_pr,  v_pr  = X[pr_mask],  y[pr_mask],  views[pr_mask]
 
@@ -558,7 +616,7 @@ def compute_confusion_knn(
     gallery_cond=None, probe_cond=None, view_match=1,
     gallery_per_subject=1, rule="centroid", K=5, l2norm=True, featurizer=None,
 ):
-    X_t, y_t, conds, views_t = extract_features_with_meta(
+    X_t, y_t, conds, views_t, folders = extract_features_with_meta(
         backbone, dl, device, region, fusion, l2norm=l2norm, featurizer=featurizer
     )
     X = X_t.cpu().numpy()
@@ -577,10 +635,7 @@ def compute_confusion_knn(
     if l2norm:
         X = _l2n(X)
 
-    gal_targets = _parse_cond_list(gallery_cond)
-    pr_targets  = _parse_cond_list(probe_cond)
-    gal_mask = np.ones(len(conds), dtype=bool) if gal_targets is None else np.isin(conds, gal_targets)
-    pr_mask  = np.ones(len(conds), dtype=bool) if pr_targets  is None else np.isin(conds, pr_targets)
+    gal_mask, pr_mask = _build_gal_probe_masks(conds, folders, gallery_cond, probe_cond)
 
     X_gal, y_gal, v_gal = X[gal_mask], y[gal_mask], views[gal_mask]
     X_pr,  y_pr,  v_pr  = X[pr_mask],  y[pr_mask],  views[pr_mask]
@@ -681,7 +736,7 @@ def run_training(args, device):
         print("[aug] Pose augmentations enabled (TemporalDropout, RandomJointMask, UpperBodyWiden)")
     
     # Data
-    train_loader, val_loader, num_classes = build_id_loaders(
+    train_loader, val_loader, test_loader, num_classes = build_id_loaders(
     csv_path=args.csv,
     region=args.region,
     seq_len=args.seq_len,
@@ -698,7 +753,8 @@ def run_training(args, device):
     pose_aug_train=pose_aug,
     )
 
-    print(f"[DATA] train={len(train_loader.dataset)} | val={len(val_loader.dataset)} | classes={num_classes}")
+    test_info = f" | test={len(test_loader.dataset)}" if test_loader else ""
+    print(f"[DATA] train={len(train_loader.dataset)} | val={len(val_loader.dataset)}{test_info} | classes={num_classes}")
     _inspect_labelmap(train_loader, val_loader, num_classes)
 
     # Condition-balanced sampler (oversample 'cl', mild 'bg')
@@ -865,23 +921,10 @@ def run_training(args, device):
         if not int(getattr(args, "dump_features", 0)):
             return
         featurizer = _choose_featurizer(args, metric)  # respects knn_source
-        X_t, y_t, conds, views_t = extract_features_with_meta(
+        X_t, y_t, conds, views_t, folders = extract_features_with_meta(
             backbone, loader, device, args.region, getattr(args, "fusion", None),
             l2norm=bool(getattr(args, "l2_norm", 1)), featurizer=featurizer
         )
-
-        # collect folders in the same iteration order as the tensors above
-        folders = []
-        base_ds = loader.dataset
-        ds_for_iter = base_ds
-        if isinstance(base_ds, tud.Subset):
-            ds_for_iter = base_ds
-            base_base = base_ds.dataset
-        else:
-            base_base = base_ds
-        for i in range(len(ds_for_iter)):
-            s = ds_for_iter[i]
-            folders.append(s["folder"])
 
         # y_map (label->subject string) for readable CSV
         def _base(ds): return ds.dataset if isinstance(ds, tud.Subset) else ds
@@ -898,7 +941,7 @@ def run_training(args, device):
 
         if int(getattr(args, "dump_match_knn", 1)):
             gal_idx, pr_idx = _materialize_knn_partition(
-                X_t.cpu(), y_t.cpu(), conds, views_t.cpu(),
+                X_t.cpu(), y_t.cpu(), conds, views_t.cpu(), folders,
                 gallery_cond=args.gallery_cond, probe_cond=args.probe_cond,
                 view_match=int(args.knn_view_match),
                 gallery_per_subject=(args.gallery_per_subject if getattr(args, "gallery_per_subject", 0) > 0 else args.knn_gallery),
@@ -1105,6 +1148,44 @@ def run_training(args, device):
                     _maybe_dump("train", train_loader)
 
     print(f"Best top1: {best_top1:.4f}")
+
+    # ---------- Final evaluation on held-out test set (Butler Item 1) ----------
+    if test_loader is not None:
+        print("\n[TEST] Evaluating on held-out test set (never used for checkpoint selection)...")
+        # Load best checkpoint
+        best_ckpt_path = os.path.join(run_dir, "best.pt")
+        if os.path.exists(best_ckpt_path):
+            ck = torch.load(best_ckpt_path, map_location=device)
+            backbone.load_state_dict(ck["backbone"])
+            if "head" in ck:
+                head.load_state_dict(ck["head"])
+            if ck.get("metric") is not None and metric is not None:
+                try: metric.load_state_dict(ck["metric"])
+                except Exception: pass
+            print(f"[TEST] Loaded best checkpoint from step {ck.get('step', '?')} (val top1={ck.get('top1', '?'):.4f})")
+
+        backbone.eval(); head.eval()
+        if metric is not None: metric.eval()
+
+        featurizer = _choose_featurizer(args, metric)
+        gal_cap = args.gallery_per_subject if getattr(args, "gallery_per_subject", 0) > 0 else args.knn_gallery
+        test_top1, test_top5 = evaluate_knn(
+            backbone, test_loader, device, args.region, args.fusion,
+            gallery_cond=args.gallery_cond, probe_cond=args.probe_cond,
+            view_match=int(args.knn_view_match), gallery_per_subject=int(gal_cap),
+            rule=args.knn_rule, K=int(args.knn_k), l2norm=bool(args.l2_norm),
+            featurizer=featurizer,
+        )
+        print(f"[TEST] test_top1={test_top1:.4f} test_top5={test_top5:.4f}")
+        append_csv(metrics_csv, {
+            "step": "test", "split": "test", "top1": test_top1,
+            "top5": test_top5, "num_classes": num_classes
+        })
+
+        # Dump test features if requested
+        dump_splits = [s.strip() for s in str(getattr(args, "dump_splits", "")).split(",") if s.strip()]
+        if "test" in dump_splits:
+            _maybe_dump("test", test_loader)
 
 # --------------------------------------------------------
 def parse_args():

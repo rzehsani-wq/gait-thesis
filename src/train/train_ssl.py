@@ -25,9 +25,11 @@ from ..datasets.dataset import CASIABPoseDataset
 from ..datasets.densegait_dataset import DenseGaitPoseDataset
 from ..datasets.ssl_dataset import MaskedJointSSL
 from ..models.model_ssl import SSLReconstructor
+from ..datasets.splits import TRAIN_SUBJECTS
 
 
 def build_base_dataset(args):
+    subject_set = TRAIN_SUBJECTS if getattr(args, "train_subjects_only", False) else None
     if args.dataset == "casia":
         ds = CASIABPoseDataset(
             csv_path=args.csv,
@@ -35,6 +37,7 @@ def build_base_dataset(args):
             stride=args.stride,
             conf_thr=args.conf_thr,
             limit_rows=args.limit_rows,
+            subject_set=subject_set,
         )
     elif args.dataset == "densegait":
         ds = DenseGaitPoseDataset(
@@ -143,6 +146,9 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save", required=True)
     ap.add_argument("--save_every", type=int, default=5)
+    ap.add_argument("--train_subjects_only", action="store_true", default=False,
+                    help="Restrict CASIA pretraining to TRAIN_SUBJECTS only (Butler Item 2). "
+                         "Ignored for DenseGait runs.")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -157,7 +163,8 @@ def main():
         num_workers=args.num_workers, pin_memory=(device.type == "cuda"),
         drop_last=True,
     )
-    print(f"[ssl] dataset={args.dataset} | windows={len(base)} | batches/epoch={len(loader)}")
+    print(f"[ssl] dataset={args.dataset} | windows={len(base)} | batches/epoch={len(loader)}"
+          f" | train_subjects_only={getattr(args, 'train_subjects_only', False)}")
 
     # Model
     model = SSLReconstructor(

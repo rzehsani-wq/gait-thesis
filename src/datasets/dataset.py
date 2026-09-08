@@ -72,10 +72,17 @@ def _derive_folder_from_image_name(df: pd.DataFrame) -> pd.Series:
 class CASIABPoseSequences:
     """
     Group rows by folder (from image_name) and create sliding windows.
+    Optionally filter to a subset of subjects at construction time.
     """
 
     def __init__(self, csv_path: str, seq_len: int = 30, stride: int = 30,
-                 limit_rows: Optional[int] = None):
+                 limit_rows: Optional[int] = None, subject_set=None):
+        """
+        Args:
+            subject_set: if provided, only keep windows whose subject ID
+                         (parsed from the folder name) is in this set.
+                         Used to restrict SSL pretraining to train subjects.
+        """
         self.df = pd.read_csv(csv_path, nrows=limit_rows)
         xcols, ycols, ccols = _find_semantic_cols(self.df)
 
@@ -98,10 +105,17 @@ class CASIABPoseSequences:
             idx = g.index.to_numpy()
             groups.append((folder, xy[idx], conf[idx]))
 
-        # Sliding windows
+        # Sliding windows (with optional subject filtering)
+        from ..utils.casia_parsing import parse_subject_from_folder
         self.seq: List[Tuple[str, np.ndarray, np.ndarray]] = []
         self.seq_len, self.stride = int(seq_len), int(stride)
+        skipped_subjects = 0
         for folder, xy_g, conf_g in groups:
+            if subject_set is not None:
+                sid = parse_subject_from_folder(folder)
+                if sid not in subject_set:
+                    skipped_subjects += 1
+                    continue
             T = len(xy_g)
             if T < self.seq_len:
                 continue
@@ -110,11 +124,12 @@ class CASIABPoseSequences:
                     (folder, xy_g[s:s + self.seq_len], conf_g[s:s + self.seq_len])
                 )
 
+        subj_msg = f" | subject_filter={'ON ('+str(len(subject_set))+' subjects)' if subject_set else 'OFF'}"
         print(
             f"[dataset] schema=semantic (nose_x, ...) | "
             f"conf={'found' if conf_found else 'missing->ones'} | "
             f"folders={self.df['folder'].nunique()} | "
-            f"windows={len(self.seq)}"
+            f"windows={len(self.seq)}{subj_msg}"
         )
 
     def __len__(self): return len(self.seq)
@@ -133,9 +148,11 @@ class CASIABPoseDataset(Dataset):
     """
 
     def __init__(self, csv_path: str, seq_len: int = 30, stride: int = 30,
-                 conf_thr: float = 0.5, limit_rows: Optional[int] = None):
+                 conf_thr: float = 0.5, limit_rows: Optional[int] = None,
+                 subject_set=None):
         self.seq = CASIABPoseSequences(
-            csv_path, seq_len=seq_len, stride=stride, limit_rows=limit_rows
+            csv_path, seq_len=seq_len, stride=stride, limit_rows=limit_rows,
+            subject_set=subject_set
         )
         self.conf_thr = float(conf_thr)
 

@@ -149,10 +149,10 @@ class SpatialBlock(nn.Module):
         # x: (B, T*J, d). Reshape to (B*T, J, d) so attention is over J only.
         B, N, D = x.shape
         assert N == T * J
-        x_r = x.reshape(B, T, J, D).reshape(B * T, J, D)
-        x_r = x_r + self.attn(self.norm1(x_r), attn_bias=None)
+        x_r = x.reshape(B, T, J, D).reshape(B * T, J, D)   # Collapse T frames into the batch dimension, so attention runs over just J joints per frame
+        x_r = x_r + self.attn(self.norm1(x_r), attn_bias=None)  # standard self-attention over J tokens
         x_r = x_r + self.ffn(self.norm2(x_r))
-        x_r = x_r.reshape(B, T, J, D).reshape(B, T * J, D)
+        x_r = x_r.reshape(B, T, J, D).reshape(B, T * J, D)  # Reshape back
         return x_r
 
 
@@ -174,7 +174,7 @@ class TemporalBlock(nn.Module):
         B, N, D = x.shape
         assert N == T * J
         # (B, T, J, D) -> (B, J, T, D) -> (B*J, T, D)
-        x_r = x.reshape(B, T, J, D).permute(0, 2, 1, 3).contiguous().reshape(B * J, T, D)
+        x_r = x.reshape(B, T, J, D).permute(0, 2, 1, 3).contiguous().reshape(B * J, T, D) # Collapse J joints into the batch dimension, so attention runs over T frames per joint
 
         bias = self.rpe(T=T, device=x.device)               # (num_heads, T, T)
         x_r = x_r + self.attn(self.norm1(x_r), attn_bias=bias)
@@ -221,7 +221,7 @@ class FactorizedPoseTransformer(nn.Module):
         # most temporal info comes from the temporal-block RPE)
         self.time_pos_embed = nn.Embedding(max_frames, d_model)
 
-        self.layers = nn.ModuleList()
+        self.layers = nn.ModuleList()   # The S-T-S-T stack
         for _ in range(depth_pairs):
             self.layers.append(SpatialBlock(d_model, nhead, mlp_ratio, dropout))
             self.layers.append(TemporalBlock(
