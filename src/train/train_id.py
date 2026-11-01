@@ -40,7 +40,9 @@ from src.utils.logger import append_csv, dump_json
 from src.data.pose_augs import Compose, TemporalDropout, RandomJointMask, RandomUpperBodyWiden
 from src.utils.casia_parsing import parse_cond_from_folder, parse_subject_from_folder, parse_view_from_folder, parse_seq_num_from_folder
 from src.utils.mask_utils import REGIONS, REGION_JOINT_INDICES
-from src.datasets.splits import TRAIN_SUBJECTS, VAL_SUBJECTS, TEST_SUBJECTS
+from src.datasets.splits import (
+    TRAIN_SUBJECTS, VAL_SUBJECTS, TEST_SUBJECTS, get_split
+)
 
 # ---------- Utilities
 def ensure_dir(p: str):
@@ -197,6 +199,7 @@ def build_id_loaders(
     split_mode: str = "subject",
     seed: int = 0,
     pose_aug_train=None,
+    protocol: str = "custom",
 ):
     base = CASIABPoseDataset(
         csv_path, seq_len=seq_len, stride=stride,
@@ -219,12 +222,14 @@ def build_id_loaders(
     train_idx, val_idx, test_idx = [], [], []
     sm = split_mode.lower()
     if sm == "subject":
-        # --- Hardcoded three-way split (Butler Item 1) ---
-        train_subjects = sorted(s for s in TRAIN_SUBJECTS if s in subject_to_indices
+        # --- Three-way split selected by protocol ---
+        # custom: 99/15/10 (thesis); standard: 74/0/50 (field-standard, Reviewer 1 R1-1)
+        _train_set, _val_set, _test_set = get_split(protocol)
+        train_subjects = sorted(s for s in _train_set if s in subject_to_indices
                                 and len(subject_to_indices[s]) >= min_clips_per_subject)
-        val_subjects   = sorted(s for s in VAL_SUBJECTS   if s in subject_to_indices
+        val_subjects   = sorted(s for s in _val_set   if s in subject_to_indices
                                 and len(subject_to_indices[s]) >= min_clips_per_subject)
-        test_subjects  = sorted(s for s in TEST_SUBJECTS  if s in subject_to_indices
+        test_subjects  = sorted(s for s in _test_set  if s in subject_to_indices
                                 and len(subject_to_indices[s]) >= min_clips_per_subject)
 
         # Disjointness assertion
@@ -284,16 +289,21 @@ def build_id_loaders(
     else:
         raise ValueError(f"Unknown split_mode: {split_mode}")
 
-    if len(train_idx) == 0 or len(val_idx) == 0:
-        raise ValueError(f"Empty split: train={len(train_idx)}, val={len(val_idx)}")
+    if len(train_idx) == 0:
+        raise ValueError(f"Empty training split: train={len(train_idx)}")
+    # Val may legitimately be empty under the standard protocol (74/0/50).
 
     train_ds = IDRegionDataset(Subset(base, train_idx), subject_to_label,
                                region=region, pose_aug=pose_aug_train, is_train=True)
-    val_ds   = IDRegionDataset(Subset(base, val_idx),   subject_to_label,
-                               region=region, pose_aug=None, is_train=False)
-
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0, drop_last=False)
-    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=0, drop_last=False)
+
+    # Validation loader (None under standard protocol: no in-training val eval,
+    # final checkpoint selected by last-step convention as in GaitSet/GaitGraph/GaitBase).
+    val_loader = None
+    if len(val_idx) > 0:
+        val_ds   = IDRegionDataset(Subset(base, val_idx),   subject_to_label,
+                                   region=region, pose_aug=None, is_train=False)
+        val_loader = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=0, drop_last=False)
 
     # Test loader (only for subject split; clip split has no held-out test set)
     test_loader = None
@@ -469,6 +479,7 @@ def evaluate_knn(
     gallery_cond: Optional[str] = None,
     probe_cond: Optional[str] = None,
     view_match: int = 1,
+    view_exclude_identical: int = 0,
     gallery_per_subject: int = 1,
     rule: str = "centroid",
     K: int = 5,
@@ -550,6 +561,7 @@ def evaluate_knn(
     for i in range(Zq_all.size(0)):
         Zq_i = Zq_all[i:i+1]
         if view_match:
+            # same-view retrieval (thesis / custom protocol)
             mask = (Vg == Vq_all[i])
             if mask.sum().item() == 0:
                 Zg_i, yg_i = Zg, yg
@@ -557,7 +569,18 @@ def evaluate_knn(
             else:
                 Zg_i, yg_i = Zg[mask], yg[mask]
                 centroids_i = _compute_centroids(Zg_i, yg_i, C) if use_centroid else None
+        elif view_exclude_identical:
+            # cross-view retrieval excluding the probe's own view
+            # (standard CASIA-B protocol, GaitSet/GaitGraph/GaitBase convention)
+            mask = (Vg != Vq_all[i])
+            if mask.sum().item() == 0:
+                Zg_i, yg_i = Zg, yg
+                centroids_i = centroids
+            else:
+                Zg_i, yg_i = Zg[mask], yg[mask]
+                centroids_i = _compute_centroids(Zg_i, yg_i, C) if use_centroid else None
         else:
+            # pooled across all views, including the probe's own
             Zg_i, yg_i = Zg, yg
             centroids_i = centroids
 
@@ -613,7 +636,7 @@ def compute_confusion(backbone, head, dl, device, region, fusion, num_classes):
 @torch.no_grad()
 def compute_confusion_knn(
     backbone, dl, device, region, fusion, *,
-    gallery_cond=None, probe_cond=None, view_match=1,
+    gallery_cond=None, probe_cond=None, view_match=1, view_exclude_identical=0,
     gallery_per_subject=1, rule="centroid", K=5, l2norm=True, featurizer=None,
 ):
     X_t, y_t, conds, views_t, folders = extract_features_with_meta(
@@ -701,6 +724,14 @@ def compute_confusion_knn(
             else:
                 Zg_i, yg_i = Zg, yg
                 centroids_i = centroids
+        elif view_exclude_identical:
+            mask = (Vg != Vq_all[i])
+            if mask.any():
+                Zg_i, yg_i = Zg[mask], yg[mask]
+                centroids_i = _compute_centroids(Zg_i, yg_i, C) if use_centroid else None
+            else:
+                Zg_i, yg_i = Zg, yg
+                centroids_i = centroids
         else:
             Zg_i, yg_i = Zg, yg
             centroids_i = centroids
@@ -751,11 +782,14 @@ def run_training(args, device):
     split_mode=getattr(args, "split_mode", "subject"),
     seed=args.seed,
     pose_aug_train=pose_aug,
+    protocol=getattr(args, "protocol", "custom"),
     )
 
+    val_info = f" | val={len(val_loader.dataset)}" if val_loader else " | val=None (standard protocol)"
     test_info = f" | test={len(test_loader.dataset)}" if test_loader else ""
-    print(f"[DATA] train={len(train_loader.dataset)} | val={len(val_loader.dataset)}{test_info} | classes={num_classes}")
-    _inspect_labelmap(train_loader, val_loader, num_classes)
+    print(f"[DATA] train={len(train_loader.dataset)}{val_info}{test_info} | classes={num_classes}")
+    if val_loader is not None:
+        _inspect_labelmap(train_loader, val_loader, num_classes)
 
     # Condition-balanced sampler (oversample 'cl', mild 'bg')
     if int(getattr(args, "balance_cond", 1)) == 1:
@@ -805,8 +839,9 @@ def run_training(args, device):
     # Consistency checks on label map
     def _base_map(ds): return ds.dataset if isinstance(ds, tud.Subset) else ds
     tm = getattr(_base_map(train_loader.dataset), "y_map", None)
-    vm = getattr(_base_map(val_loader.dataset),   "y_map", None)
-    assert tm and vm and (tm == vm), "Label-map mismatch: train and val y_map differ."
+    if val_loader is not None:
+        vm = getattr(_base_map(val_loader.dataset),   "y_map", None)
+        assert tm and vm and (tm == vm), "Label-map mismatch: train and val y_map differ."
     assert num_classes == len(tm), "num_classes != size of y_map."
 
     # Run directory & config dump
@@ -1049,32 +1084,43 @@ def run_training(args, device):
         if (step % args.eval_every == 0) or (step == args.steps):
             backbone.eval(); head.eval()
             if metric is not None: metric.eval()
-            
-            if args.eval_protocol == "classifier":
-                top1, top5 = evaluate(backbone, head, val_loader, device, args.region, args.fusion)
+
+            # Under standard protocol, val_loader is None: skip in-training eval,
+            # just save a periodic checkpoint. Final test evaluation at the end.
+            do_val_eval = (val_loader is not None)
+
+            top1 = top5 = None
+            if do_val_eval:
+                if args.eval_protocol == "classifier":
+                    top1, top5 = evaluate(backbone, head, val_loader, device, args.region, args.fusion)
+                else:
+                    gal_cap = args.gallery_per_subject if getattr(args, "gallery_per_subject", 0) > 0 else args.knn_gallery
+                    top1, top5 = evaluate_knn(
+                        backbone, val_loader, device, args.region, args.fusion,
+                        gallery_cond=args.gallery_cond, probe_cond=args.probe_cond,
+                        view_match=int(args.knn_view_match),
+                        view_exclude_identical=int(getattr(args, "knn_view_exclude_identical", 0)),
+                        gallery_per_subject=int(gal_cap),
+                        rule=args.knn_rule, K=int(args.knn_k), l2norm=bool(args.l2_norm),
+                        featurizer=featurizer,
+                    )
+
+                if num_classes >= 5:
+                    print(f"[val@{step}] top1={top1:.4f} top5={top5:.4f}")
+                else:
+                    print(f"[val@{step}] top1={top1:.4f}")
+                append_csv(metrics_csv, {
+                    "step": step, "split": "val", "top1": top1,
+                    "top5": top5 if num_classes >= 5 else top1, "num_classes": num_classes
+                })
             else:
-                gal_cap = args.gallery_per_subject if getattr(args, "gallery_per_subject", 0) > 0 else args.knn_gallery
-                top1, top5 = evaluate_knn(
-                    backbone, val_loader, device, args.region, args.fusion,
-                    gallery_cond=args.gallery_cond, probe_cond=args.probe_cond,
-                    view_match=int(args.knn_view_match), gallery_per_subject=int(gal_cap),
-                    rule=args.knn_rule, K=int(args.knn_k), l2norm=bool(args.l2_norm),
-                    featurizer=featurizer,
-                )
-            
-            if num_classes >= 5:
-                print(f"[val@{step}] top1={top1:.4f} top5={top5:.4f}")
-            else:
-                print(f"[val@{step}] top1={top1:.4f}")
-            append_csv(metrics_csv, {
-                "step": step, "split": "val", "top1": top1,
-                "top5": top5 if num_classes >= 5 else top1, "num_classes": num_classes
-            })
-            # ---- simple checkpointing: last, best, and periodic ----
+                print(f"[step {step}] standard protocol: no val eval; checkpoint saved to last.pt")
+
+            # ---- checkpointing ----
             ckpt = {
                 "step": step,
-                "top1": top1,
-                "top5": top5,
+                "top1": top1 if top1 is not None else -1.0,
+                "top5": top5 if top5 is not None else -1.0,
                 "args": vars(args),
                 "backbone": backbone.state_dict(),
                 "head": head.state_dict(),
@@ -1084,10 +1130,9 @@ def run_training(args, device):
             # always keep the latest
             torch.save(ckpt, os.path.join(run_dir, "last.pt"))
 
-            # update best
-            if top1 > best_top1:
+            # update best (only when we have val-based selection)
+            if do_val_eval and top1 is not None and top1 > best_top1:
                 torch.save(ckpt, os.path.join(run_dir, "best.pt"))
-                # (optional) write a tiny JSON tag for quick scanning
                 dump_json(os.path.join(run_dir, "best.json"), {"step": step, "top1": top1})
                 print(f"[val@{step}] new best → {top1:.4f}; saved best.pt")
 
@@ -1095,9 +1140,10 @@ def run_training(args, device):
             if args.confmat_every and (step % args.confmat_every == 0):
                 torch.save(ckpt, os.path.join(run_dir, f"ckpt_step{step}.pt"))
 
-            best_top1 = max(best_top1, top1)
+            if do_val_eval and top1 is not None:
+                best_top1 = max(best_top1, top1)
 
-            need_conf = (
+            need_conf = do_val_eval and (
                 (args.confmat_every and args.confmat_every > 0 and (step % args.confmat_every == 0))
                 or (args.save_final_confmat and step == args.steps)
             )
@@ -1110,7 +1156,9 @@ def run_training(args, device):
                     conf = compute_confusion_knn(
                         backbone, val_loader, device, args.region, args.fusion,
                         gallery_cond=args.gallery_cond, probe_cond=args.probe_cond,
-                        view_match=int(args.knn_view_match), gallery_per_subject=int(gal_cap),
+                        view_match=int(args.knn_view_match),
+                        view_exclude_identical=int(getattr(args, "knn_view_exclude_identical", 0)),
+                        gallery_per_subject=int(gal_cap),
                         rule=args.knn_rule, K=int(args.knn_k), l2norm=bool(args.l2_norm),
                         featurizer=featurizer,
                     )
@@ -1149,20 +1197,35 @@ def run_training(args, device):
 
     print(f"Best top1: {best_top1:.4f}")
 
-    # ---------- Final evaluation on held-out test set (Butler Item 1) ----------
+    # ---------- Final evaluation on held-out test set ----------
     if test_loader is not None:
         print("\n[TEST] Evaluating on held-out test set (never used for checkpoint selection)...")
-        # Load best checkpoint
-        best_ckpt_path = os.path.join(run_dir, "best.pt")
-        if os.path.exists(best_ckpt_path):
-            ck = torch.load(best_ckpt_path, map_location=device)
+
+        # Checkpoint-selection strategy:
+        # - custom protocol: use best.pt (val-selected), fall back to last.pt
+        # - standard protocol: use last.pt directly (field convention,
+        #   GaitSet/GaitGraph/GaitBase)
+        protocol = getattr(args, "protocol", "custom")
+        if protocol == "standard":
+            ckpt_path = os.path.join(run_dir, "last.pt")
+            ckpt_label = "last (standard protocol)"
+        else:
+            ckpt_path = os.path.join(run_dir, "best.pt")
+            ckpt_label = "best (val-selected)"
+            if not os.path.exists(ckpt_path):
+                ckpt_path = os.path.join(run_dir, "last.pt")
+                ckpt_label = "last (best.pt missing)"
+
+        if os.path.exists(ckpt_path):
+            ck = torch.load(ckpt_path, map_location=device)
             backbone.load_state_dict(ck["backbone"])
             if "head" in ck:
                 head.load_state_dict(ck["head"])
             if ck.get("metric") is not None and metric is not None:
                 try: metric.load_state_dict(ck["metric"])
                 except Exception: pass
-            print(f"[TEST] Loaded best checkpoint from step {ck.get('step', '?')} (val top1={ck.get('top1', '?'):.4f})")
+            top1_str = f"{ck.get('top1'):.4f}" if isinstance(ck.get('top1'), float) and ck.get('top1') >= 0 else "n/a"
+            print(f"[TEST] Loaded {ckpt_label} checkpoint from step {ck.get('step', '?')} (val top1={top1_str})")
 
         backbone.eval(); head.eval()
         if metric is not None: metric.eval()
@@ -1172,7 +1235,9 @@ def run_training(args, device):
         test_top1, test_top5 = evaluate_knn(
             backbone, test_loader, device, args.region, args.fusion,
             gallery_cond=args.gallery_cond, probe_cond=args.probe_cond,
-            view_match=int(args.knn_view_match), gallery_per_subject=int(gal_cap),
+            view_match=int(args.knn_view_match),
+            view_exclude_identical=int(getattr(args, "knn_view_exclude_identical", 0)),
+            gallery_per_subject=int(gal_cap),
             rule=args.knn_rule, K=int(args.knn_k), l2norm=bool(args.l2_norm),
             featurizer=featurizer,
         )
@@ -1249,6 +1314,14 @@ def parse_args():
                    help="auto: metric if available else raw; raw: backbone z; metric: MetricHead projection")
     p.add_argument('--knn_view_match', type=int, default=0,
                    help="If 1, restrict candidates to same view id as probe.")
+    p.add_argument('--knn_view_exclude_identical', type=int, default=0,
+                   help="If 1, exclude same-view gallery items for each probe "
+                        "(standard CASIA-B cross-view protocol). Ignored when "
+                        "--knn_view_match=1.")
+    p.add_argument('--protocol', choices=['custom', 'standard'], default='custom',
+                   help="custom: 99/15/10 split with view-matched retrieval (thesis). "
+                        "standard: 74/50 split with cross-view retrieval, field "
+                        "convention (Reviewer 1 R1-1).")
 
     # --- Feature export / export-only ---
     p.add_argument('--dump_features', type=int, default=0,

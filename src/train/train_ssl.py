@@ -25,11 +25,19 @@ from ..datasets.dataset import CASIABPoseDataset
 from ..datasets.densegait_dataset import DenseGaitPoseDataset
 from ..datasets.ssl_dataset import MaskedJointSSL
 from ..models.model_ssl import SSLReconstructor
-from ..datasets.splits import TRAIN_SUBJECTS
+from ..datasets.splits import TRAIN_SUBJECTS, get_split
 
 
 def build_base_dataset(args):
-    subject_set = TRAIN_SUBJECTS if getattr(args, "train_subjects_only", False) else None
+    # Select the training-subject set for CASIA SSL pretraining according to
+    # --protocol. "custom" uses the 99-subject thesis split; "standard" uses
+    # the field-standard 74-subject split (Reviewer 1 R1-1).
+    if getattr(args, "train_subjects_only", False):
+        protocol = getattr(args, "protocol", "custom")
+        _train_set, _, _ = get_split(protocol)
+        subject_set = _train_set
+    else:
+        subject_set = None
     if args.dataset == "casia":
         ds = CASIABPoseDataset(
             csv_path=args.csv,
@@ -147,8 +155,14 @@ def main():
     ap.add_argument("--save", required=True)
     ap.add_argument("--save_every", type=int, default=5)
     ap.add_argument("--train_subjects_only", action="store_true", default=False,
-                    help="Restrict CASIA pretraining to TRAIN_SUBJECTS only (Butler Item 2). "
-                         "Ignored for DenseGait runs.")
+                    help="Restrict CASIA pretraining to the training-subject pool "
+                         "selected by --protocol. Ignored for DenseGait runs.")
+    ap.add_argument("--protocol", choices=["custom", "standard"], default="custom",
+                    help="Match the split used downstream by train_id.py. "
+                         "custom = 99-subject thesis pool. "
+                         "standard = 74-subject field-standard pool (Reviewer 1 R1-1). "
+                         "Ignored unless --train_subjects_only is set, and ignored "
+                         "for DenseGait runs.")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -164,7 +178,8 @@ def main():
         drop_last=True,
     )
     print(f"[ssl] dataset={args.dataset} | windows={len(base)} | batches/epoch={len(loader)}"
-          f" | train_subjects_only={getattr(args, 'train_subjects_only', False)}")
+          f" | train_subjects_only={getattr(args, 'train_subjects_only', False)}"
+          f" | protocol={getattr(args, 'protocol', 'custom')}")
 
     # Model
     model = SSLReconstructor(
