@@ -21,11 +21,11 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from ..datasets.dataset import CASIABPoseDataset
-from ..datasets.densegait_dataset import DenseGaitPoseDataset
-from ..datasets.ssl_dataset import MaskedJointSSL
-from ..models.model_ssl import SSLReconstructor
-from ..datasets.splits import TRAIN_SUBJECTS, get_split
+from src.datasets.dataset import CASIABPoseDataset
+from src.datasets.densegait_dataset import DenseGaitPoseDataset
+from src.datasets.ssl_dataset import MaskedJointSSL
+from src.models.model_ssl import SSLReconstructor
+from src.datasets.splits import TRAIN_SUBJECTS, get_split
 
 
 def build_base_dataset(args):
