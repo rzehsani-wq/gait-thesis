@@ -873,6 +873,7 @@ def run_training(args, device):
         l2_norm=bool(getattr(args, "l2_norm", 0)),
         device=device,
         use_graph_mask=bool(getattr(args, "graph_mask", 0)),
+        spatial_only=bool(getattr(args, "spatial_only", 0)),
     )
 
     # Trainability (explicit)
@@ -1330,6 +1331,14 @@ def parse_args():
                         "Reviewer 2 (R2-4). Must match the --graph_mask flag "
                         "used when the SSL checkpoint was pretrained for a "
                         "fair comparison. Default 0 (no mask).")
+    p.add_argument('--spatial_only', type=int, default=0,
+                   help="If 1, replace every TemporalBlock with a "
+                        "SpatialBlock (stack becomes S-S-S-S instead of "
+                        "S-T-S-T). Implements the spatial-only ablation "
+                        "requested by Reviewer 3 (R3-3). MUST match the "
+                        "--spatial_only flag used when the SSL checkpoint "
+                        "was pretrained; a spatial-only checkpoint will not "
+                        "load into the main architecture. Default 0.")
 
     # --- Feature export / export-only ---
     p.add_argument('--dump_features', type=int, default=0,

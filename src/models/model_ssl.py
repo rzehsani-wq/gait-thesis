@@ -278,6 +278,13 @@ class FactorizedPoseTransformer(nn.Module):
 
     When `use_graph_mask=True`, every SpatialBlock applies the COCO-17
     skeleton adjacency mask (R2-4 ablation). TemporalBlocks are unaffected.
+
+    When `spatial_only=True`, every TemporalBlock is replaced by an additional
+    SpatialBlock (R3-3 ablation). The stack becomes S-S-S-S instead of
+    S-T-S-T, preserving total depth and parameter count to within the
+    RPE-table size (~520 params at d_model=128, nhead=4, depth_pairs=2).
+    Cross-frame temporal information survives only through time_pos_embed
+    at the input and the final mean-pool over tokens.
     """
     def __init__(
         self,
@@ -291,12 +298,14 @@ class FactorizedPoseTransformer(nn.Module):
         rpe_max_exact: int = 8,
         rpe_num_buckets: int = 32,
         use_graph_mask: bool = False,
+        spatial_only: bool = False,
     ):
         super().__init__()
         self.d_model = d_model
         self.max_joints = max_joints
         self.max_frames = max_frames
         self.use_graph_mask = bool(use_graph_mask)
+        self.spatial_only = bool(spatial_only)
 
         # Per-joint coordinate embedding: (x, y) -> d_model
         self.coord_embed = nn.Linear(2, d_model)
@@ -306,16 +315,25 @@ class FactorizedPoseTransformer(nn.Module):
         # most temporal info comes from the temporal-block RPE)
         self.time_pos_embed = nn.Embedding(max_frames, d_model)
 
-        self.layers = nn.ModuleList()   # The S-T-S-T stack
+        self.layers = nn.ModuleList()   # S-T-S-T stack, or S-S-S-S if spatial_only
         for _ in range(depth_pairs):
             self.layers.append(SpatialBlock(
                 d_model, nhead, mlp_ratio, dropout,
                 use_graph_mask=self.use_graph_mask,
             ))
-            self.layers.append(TemporalBlock(
-                d_model, nhead, mlp_ratio, dropout,
-                rpe_max_exact=rpe_max_exact, rpe_num_buckets=rpe_num_buckets,
-            ))
+            if self.spatial_only:
+                # Replace TemporalBlock with another SpatialBlock. Preserves
+                # depth; the only parameter-count delta is the omitted RPE
+                # table (~260 params per removed TemporalBlock).
+                self.layers.append(SpatialBlock(
+                    d_model, nhead, mlp_ratio, dropout,
+                    use_graph_mask=self.use_graph_mask,
+                ))
+            else:
+                self.layers.append(TemporalBlock(
+                    d_model, nhead, mlp_ratio, dropout,
+                    rpe_max_exact=rpe_max_exact, rpe_num_buckets=rpe_num_buckets,
+                ))
 
         self.norm_out = nn.LayerNorm(d_model)
 
@@ -375,6 +393,7 @@ class SSLReconstructor(nn.Module):
         rpe_max_exact: int = 8,
         rpe_num_buckets: int = 32,
         use_graph_mask: bool = False,
+        spatial_only: bool = False,
     ):
         super().__init__()
         self.backbone = FactorizedPoseTransformer(
@@ -383,6 +402,7 @@ class SSLReconstructor(nn.Module):
             max_joints=max_joints, max_frames=max_frames,
             rpe_max_exact=rpe_max_exact, rpe_num_buckets=rpe_num_buckets,
             use_graph_mask=use_graph_mask,
+            spatial_only=spatial_only,
         )
         self.head = nn.Linear(d_model, 2)
         self.d_model = d_model
@@ -450,6 +470,7 @@ def load_ssl_backbone(
     max_frames: int = 128,
     allow_partial: bool = False,
     use_graph_mask: bool = False,
+    spatial_only: bool = False,
 ) -> SSLBackbone:
     """
     Build SSLBackbone and (optionally) load weights from a checkpoint.
@@ -460,6 +481,12 @@ def load_ssl_backbone(
     attention (R2-4 ablation). Because the adjacency is stored as a
     non-persistent buffer, checkpoints are interoperable across the two
     settings; the flag only changes forward-time behavior.
+
+    `spatial_only` replaces every TemporalBlock with a SpatialBlock (R3-3
+    ablation). This DOES change the architecture: the resulting state_dict
+    has no `rpe` entries, so main-model checkpoints (S-T-S-T) cannot be
+    loaded into a spatial-only model and vice versa. The flag must match
+    the architecture the checkpoint was trained with.
     """
     ckpt_str = "" if ckpt_path is None else str(ckpt_path).strip()
     use_random = (ckpt_str == "" or ckpt_str.lower() in {"none", "null", "scratch", "random"})
@@ -468,11 +495,12 @@ def load_ssl_backbone(
         d_model=d_model, nhead=nhead, depth_pairs=depth_pairs,
         max_joints=max_joints, max_frames=max_frames,
         use_graph_mask=use_graph_mask,
+        spatial_only=spatial_only,
     ).to(device)
 
     if use_random:
         print(f"[ckpt] no checkpoint -> using randomly initialized backbone"
-              f" | use_graph_mask={use_graph_mask}")
+              f" | use_graph_mask={use_graph_mask} | spatial_only={spatial_only}")
         ssl.eval()
         return SSLBackbone(ssl, proj_dim=proj_dim, l2_norm=l2_norm).to(device)
 
@@ -486,7 +514,7 @@ def load_ssl_backbone(
         ssl.load_state_dict(state, strict=True)
         n_total = len(ssl.state_dict())
         print(f"[ckpt] loaded {ckpt_str}: {n_total}/{n_total} keys (strict OK)"
-              f" | use_graph_mask={use_graph_mask}")
+              f" | use_graph_mask={use_graph_mask} | spatial_only={spatial_only}")
     except RuntimeError:
         result = ssl.load_state_dict(state, strict=False)
         n_total = len(ssl.state_dict())

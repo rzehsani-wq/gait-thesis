@@ -168,6 +168,13 @@ def main():
                          "adjacent COCO-17 joint pairs (plus self-loops). "
                          "Implements the graph-prior ablation requested by "
                          "Reviewer 2 (R2-4). Default 0 (no mask).")
+    ap.add_argument("--spatial_only", type=int, default=0,
+                    help="If 1, replace every TemporalBlock with a "
+                         "SpatialBlock (stack becomes S-S-S-S instead of "
+                         "S-T-S-T). Implements the spatial-only ablation "
+                         "requested by Reviewer 3 (R3-3). Resulting "
+                         "checkpoints are NOT interchangeable with "
+                         "main-architecture checkpoints. Default 0.")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -185,13 +192,15 @@ def main():
     print(f"[ssl] dataset={args.dataset} | windows={len(base)} | batches/epoch={len(loader)}"
           f" | train_subjects_only={getattr(args, 'train_subjects_only', False)}"
           f" | protocol={getattr(args, 'protocol', 'custom')}"
-          f" | graph_mask={bool(args.graph_mask)}")
+          f" | graph_mask={bool(args.graph_mask)}"
+          f" | spatial_only={bool(args.spatial_only)}")
 
     # Model
     model = SSLReconstructor(
         d_model=args.d_model, nhead=args.nhead,
         depth_pairs=args.depth_pairs, dropout=args.dropout,
         use_graph_mask=bool(args.graph_mask),
+        spatial_only=bool(args.spatial_only),
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[ssl] model params: {n_params:,}")
@@ -246,6 +255,7 @@ def main():
                     "dataset": args.dataset, "seq_len": args.seq_len,
                     "mask_ratio": args.mask_ratio,
                     "use_graph_mask": bool(args.graph_mask),
+                    "spatial_only": bool(args.spatial_only),
                     "protocol": getattr(args, "protocol", "custom"),
                 },
             }
