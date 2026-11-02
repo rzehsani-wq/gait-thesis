@@ -872,6 +872,7 @@ def run_training(args, device):
         proj_dim=args.proj_dim,
         l2_norm=bool(getattr(args, "l2_norm", 0)),
         device=device,
+        use_graph_mask=bool(getattr(args, "graph_mask", 0)),
     )
 
     # Trainability (explicit)
@@ -1322,6 +1323,13 @@ def parse_args():
                    help="custom: 99/15/10 split with view-matched retrieval (thesis). "
                         "standard: 74/50 split with cross-view retrieval, field "
                         "convention (Reviewer 1 R1-1).")
+    p.add_argument('--graph_mask', type=int, default=0,
+                   help="If 1, restrict spatial attention to skeletally-"
+                        "adjacent COCO-17 joint pairs (plus self-loops). "
+                        "Implements the graph-prior ablation requested by "
+                        "Reviewer 2 (R2-4). Must match the --graph_mask flag "
+                        "used when the SSL checkpoint was pretrained for a "
+                        "fair comparison. Default 0 (no mask).")
 
     # --- Feature export / export-only ---
     p.add_argument('--dump_features', type=int, default=0,

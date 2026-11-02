@@ -163,6 +163,11 @@ def main():
                          "standard = 74-subject field-standard pool (Reviewer 1 R1-1). "
                          "Ignored unless --train_subjects_only is set, and ignored "
                          "for DenseGait runs.")
+    ap.add_argument("--graph_mask", type=int, default=0,
+                    help="If 1, restrict spatial attention to skeletally-"
+                         "adjacent COCO-17 joint pairs (plus self-loops). "
+                         "Implements the graph-prior ablation requested by "
+                         "Reviewer 2 (R2-4). Default 0 (no mask).")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -179,12 +184,14 @@ def main():
     )
     print(f"[ssl] dataset={args.dataset} | windows={len(base)} | batches/epoch={len(loader)}"
           f" | train_subjects_only={getattr(args, 'train_subjects_only', False)}"
-          f" | protocol={getattr(args, 'protocol', 'custom')}")
+          f" | protocol={getattr(args, 'protocol', 'custom')}"
+          f" | graph_mask={bool(args.graph_mask)}")
 
     # Model
     model = SSLReconstructor(
         d_model=args.d_model, nhead=args.nhead,
         depth_pairs=args.depth_pairs, dropout=args.dropout,
+        use_graph_mask=bool(args.graph_mask),
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[ssl] model params: {n_params:,}")
@@ -238,6 +245,8 @@ def main():
                     "epoch": epoch, "loss": epoch_loss,
                     "dataset": args.dataset, "seq_len": args.seq_len,
                     "mask_ratio": args.mask_ratio,
+                    "use_graph_mask": bool(args.graph_mask),
+                    "protocol": getattr(args, "protocol", "custom"),
                 },
             }
             torch.save(ck, args.save)

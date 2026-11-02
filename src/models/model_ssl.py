@@ -7,6 +7,8 @@ Architecture (Factorized Spatial/Temporal Attention, Spatial-First):
   Embed:  per-joint coord-embed + learned joint-ID embed + learned time-pos embed
   Stack:  4 layers alternating spatial / temporal attention (S-T-S-T)
     spatial layer:  attention within each frame, across J joints
+                    optional graph-prior mask (R2-4 ablation): spatial attention
+                    restricted to skeletally-adjacent COCO-17 joint pairs.
     temporal layer: attention within each joint, across T frames
                     with relative temporal positional bias (RPE)
   Output: (B, T*J, d_model) features, mean-pooled to (B, d_model) for ID
@@ -18,6 +20,45 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+# ---------------------------------------------------------------------------
+# COCO-17 skeleton adjacency (used only when the graph-prior ablation is on;
+# addresses Reviewer 2, Comment 4).
+# ---------------------------------------------------------------------------
+
+COCO17_BONES = [
+    # Face
+    (0, 1), (0, 2), (1, 3), (2, 4),
+    # Arms
+    (5, 7), (7, 9),         # L shoulder -> elbow -> wrist
+    (6, 8), (8, 10),        # R shoulder -> elbow -> wrist
+    # Shoulder bar
+    (5, 6),
+    # Torso
+    (5, 11), (6, 12), (11, 12),
+    # Legs
+    (11, 13), (13, 15),     # L hip -> knee -> ankle
+    (12, 14), (14, 16),     # R hip -> knee -> ankle
+]
+
+
+def build_coco17_adjacency(include_self_loops: bool = True) -> torch.Tensor:
+    """
+    Boolean adjacency over the 17 COCO joints. Edges are bidirectional, drawn
+    from COCO17_BONES; the diagonal is True when include_self_loops=True so
+    each joint can attend to itself.
+
+    Returns:
+        (17, 17) torch.bool tensor.
+    """
+    adj = torch.zeros(17, 17, dtype=torch.bool)
+    if include_self_loops:
+        adj.fill_diagonal_(True)
+    for i, j in COCO17_BONES:
+        adj[i, j] = True
+        adj[j, i] = True
+    return adj
 
 
 # ---------------------------------------------------------------------------
@@ -58,8 +99,8 @@ class RelTemporalBias(nn.Module):
         log_bucket = log_bucket.clamp(max=self.num_buckets)
 
         bucket_abs = torch.where(small, exact_bucket, log_bucket).long()
-        # signed bucket: 0..num_buckets for forward, 
-        # num_buckets+1..2*num_buckets for backward, 
+        # signed bucket: 0..num_buckets for forward,
+        # num_buckets+1..2*num_buckets for backward,
         # center is num_buckets
         # use center = num_buckets as the zero-offset
         signed = self.num_buckets + (sign.long() * bucket_abs)
@@ -96,7 +137,7 @@ class MHA(nn.Module):
         self.drop = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor, attn_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        # x: (B, N, d). attn_bias: (num_heads, N, N) or None
+        # x: (B, N, d). attn_bias: (num_heads, N, N) or (N, N) or None
         B, N, D = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim)
         qkv = qkv.permute(2, 0, 3, 1, 4)        # (3, B, H, N, hd)
@@ -133,24 +174,59 @@ class FFN(nn.Module):
 
 class SpatialBlock(nn.Module):
     """
-    Transformer Encoder Layer: treats each frame of a sequence independently and 
-    calculates attention only among the spatial joints, like how the hand joint 
+    Transformer Encoder Layer: treats each frame of a sequence independently and
+    calculates attention only among the spatial joints, like how the hand joint
     relates to the elbow joint within the exact same frame.
     Attention within each frame, across J joints. No positional bias.
+
+    If `use_graph_mask=True`, the within-frame spatial attention is restricted
+    to skeletally-adjacent COCO-17 joint pairs (plus self-loops), implementing
+    the graph-prior ablation requested by Reviewer 2 (R2-4). The adjacency is
+    held in a non-persistent buffer so SSL checkpoints are interoperable
+    across the two settings.
     """
-    def __init__(self, d_model: int, num_heads: int, mlp_ratio: int = 4, dropout: float = 0.1):
+    def __init__(self, d_model: int, num_heads: int, mlp_ratio: int = 4,
+                 dropout: float = 0.1, use_graph_mask: bool = False):
         super().__init__()
         self.norm1 = nn.LayerNorm(d_model)
         self.attn = MHA(d_model, num_heads, dropout=dropout)
         self.norm2 = nn.LayerNorm(d_model)
         self.ffn = FFN(d_model, mlp_ratio=mlp_ratio, dropout=dropout)
+        self.use_graph_mask = bool(use_graph_mask)
+        # Non-persistent buffer: moves with .to(device) but NOT serialized in
+        # state_dict, so checkpoints are the same regardless of this flag.
+        self.register_buffer(
+            "full_adj",
+            build_coco17_adjacency(include_self_loops=True),
+            persistent=False,
+        )
 
-    def forward(self, x: torch.Tensor, T: int, J: int) -> torch.Tensor:
+    def _graph_attn_bias(self, J: int, joint_indices: Optional[torch.Tensor],
+                         device: torch.device) -> torch.Tensor:
+        """
+        Return a (J, J) additive mask: 0 for allowed pairs, -inf for disallowed.
+        Sliced from the full COCO-17 adjacency using joint_indices.
+        """
+        if joint_indices is None:
+            joint_indices = torch.arange(J, device=device, dtype=torch.long)
+        else:
+            joint_indices = joint_indices.to(device=device, dtype=torch.long)
+        sub_adj = self.full_adj[joint_indices][:, joint_indices]       # (J, J) bool
+        bias = torch.zeros(J, J, device=device, dtype=torch.float32)
+        bias = bias.masked_fill(~sub_adj, float("-inf"))
+        return bias
+
+    def forward(self, x: torch.Tensor, T: int, J: int,
+                joint_indices: Optional[torch.Tensor] = None) -> torch.Tensor:
         # x: (B, T*J, d). Reshape to (B*T, J, d) so attention is over J only.
         B, N, D = x.shape
         assert N == T * J
         x_r = x.reshape(B, T, J, D).reshape(B * T, J, D)   # Collapse T frames into the batch dimension, so attention runs over just J joints per frame
-        x_r = x_r + self.attn(self.norm1(x_r), attn_bias=None)  # standard self-attention over J tokens
+
+        attn_bias = (self._graph_attn_bias(J, joint_indices, x_r.device)
+                     if self.use_graph_mask else None)
+
+        x_r = x_r + self.attn(self.norm1(x_r), attn_bias=attn_bias)
         x_r = x_r + self.ffn(self.norm2(x_r))
         x_r = x_r.reshape(B, T, J, D).reshape(B, T * J, D)  # Reshape back
         return x_r
@@ -169,8 +245,12 @@ class TemporalBlock(nn.Module):
         self.ffn = FFN(d_model, mlp_ratio=mlp_ratio, dropout=dropout)
         self.rpe = RelTemporalBias(num_heads, max_exact=rpe_max_exact, num_buckets=rpe_num_buckets)
 
-    def forward(self, x: torch.Tensor, T: int, J: int) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, T: int, J: int,
+                joint_indices: Optional[torch.Tensor] = None) -> torch.Tensor:
         # x: (B, T*J, d). Reshape to (B*J, T, d) so attention is over T only.
+        # joint_indices is accepted for signature parity with SpatialBlock but
+        # is unused: temporal attention is per-joint over frames.
+        del joint_indices
         B, N, D = x.shape
         assert N == T * J
         # (B, T, J, D) -> (B, J, T, D) -> (B*J, T, D)
@@ -195,6 +275,9 @@ class FactorizedPoseTransformer(nn.Module):
 
     The encoder is a stack of alternating SpatialBlock / TemporalBlock layers
     (spatial-first: S-T-S-T-...). Number of S blocks == number of T blocks.
+
+    When `use_graph_mask=True`, every SpatialBlock applies the COCO-17
+    skeleton adjacency mask (R2-4 ablation). TemporalBlocks are unaffected.
     """
     def __init__(
         self,
@@ -207,11 +290,13 @@ class FactorizedPoseTransformer(nn.Module):
         max_frames: int = 128,
         rpe_max_exact: int = 8,
         rpe_num_buckets: int = 32,
+        use_graph_mask: bool = False,
     ):
         super().__init__()
         self.d_model = d_model
         self.max_joints = max_joints
         self.max_frames = max_frames
+        self.use_graph_mask = bool(use_graph_mask)
 
         # Per-joint coordinate embedding: (x, y) -> d_model
         self.coord_embed = nn.Linear(2, d_model)
@@ -223,7 +308,10 @@ class FactorizedPoseTransformer(nn.Module):
 
         self.layers = nn.ModuleList()   # The S-T-S-T stack
         for _ in range(depth_pairs):
-            self.layers.append(SpatialBlock(d_model, nhead, mlp_ratio, dropout))
+            self.layers.append(SpatialBlock(
+                d_model, nhead, mlp_ratio, dropout,
+                use_graph_mask=self.use_graph_mask,
+            ))
             self.layers.append(TemporalBlock(
                 d_model, nhead, mlp_ratio, dropout,
                 rpe_max_exact=rpe_max_exact, rpe_num_buckets=rpe_num_buckets,
@@ -260,9 +348,10 @@ class FactorizedPoseTransformer(nn.Module):
         # Flatten to T*J tokens
         h = h.reshape(B, T * J, self.d_model)
 
-        # Apply factorized encoder
+        # Apply factorized encoder; SpatialBlocks consume joint_indices for
+        # the graph mask (when enabled), TemporalBlocks ignore it.
         for layer in self.layers:
-            h = layer(h, T=T, J=J)
+            h = layer(h, T=T, J=J, joint_indices=joint_indices)
 
         h = self.norm_out(h)
         return h        # (B, T*J, d_model)
@@ -285,6 +374,7 @@ class SSLReconstructor(nn.Module):
         max_frames: int = 128,
         rpe_max_exact: int = 8,
         rpe_num_buckets: int = 32,
+        use_graph_mask: bool = False,
     ):
         super().__init__()
         self.backbone = FactorizedPoseTransformer(
@@ -292,6 +382,7 @@ class SSLReconstructor(nn.Module):
             mlp_ratio=mlp_ratio, dropout=dropout,
             max_joints=max_joints, max_frames=max_frames,
             rpe_max_exact=rpe_max_exact, rpe_num_buckets=rpe_num_buckets,
+            use_graph_mask=use_graph_mask,
         )
         self.head = nn.Linear(d_model, 2)
         self.d_model = d_model
@@ -358,11 +449,17 @@ def load_ssl_backbone(
     max_joints: int = 17,
     max_frames: int = 128,
     allow_partial: bool = False,
+    use_graph_mask: bool = False,
 ) -> SSLBackbone:
     """
     Build SSLBackbone and (optionally) load weights from a checkpoint.
     Refuses silent partial loads by default; pass allow_partial=True or set
     FORCE_LOAD=1 to override.
+
+    `use_graph_mask` toggles the COCO-17 adjacency mask inside spatial
+    attention (R2-4 ablation). Because the adjacency is stored as a
+    non-persistent buffer, checkpoints are interoperable across the two
+    settings; the flag only changes forward-time behavior.
     """
     ckpt_str = "" if ckpt_path is None else str(ckpt_path).strip()
     use_random = (ckpt_str == "" or ckpt_str.lower() in {"none", "null", "scratch", "random"})
@@ -370,10 +467,12 @@ def load_ssl_backbone(
     ssl = SSLReconstructor(
         d_model=d_model, nhead=nhead, depth_pairs=depth_pairs,
         max_joints=max_joints, max_frames=max_frames,
+        use_graph_mask=use_graph_mask,
     ).to(device)
 
     if use_random:
-        print("[ckpt] no checkpoint -> using randomly initialized backbone")
+        print(f"[ckpt] no checkpoint -> using randomly initialized backbone"
+              f" | use_graph_mask={use_graph_mask}")
         ssl.eval()
         return SSLBackbone(ssl, proj_dim=proj_dim, l2_norm=l2_norm).to(device)
 
@@ -386,7 +485,8 @@ def load_ssl_backbone(
     try:
         ssl.load_state_dict(state, strict=True)
         n_total = len(ssl.state_dict())
-        print(f"[ckpt] loaded {ckpt_str}: {n_total}/{n_total} keys (strict OK)")
+        print(f"[ckpt] loaded {ckpt_str}: {n_total}/{n_total} keys (strict OK)"
+              f" | use_graph_mask={use_graph_mask}")
     except RuntimeError:
         result = ssl.load_state_dict(state, strict=False)
         n_total = len(ssl.state_dict())
