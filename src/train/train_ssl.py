@@ -56,6 +56,8 @@ def build_base_dataset(args):
             conf_thr=args.conf_thr,
             limit_rows=args.limit_rows,
             limit_files=args.limit_files,
+            subsample_n=args.subsample_n,
+            subsample_seed=args.subsample_seed,
         )
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}")
@@ -175,6 +177,14 @@ def main():
                          "requested by Reviewer 3 (R3-3). Resulting "
                          "checkpoints are NOT interchangeable with "
                          "main-architecture checkpoints. Default 0.")
+    ap.add_argument("--subsample_n", type=int, default=None,
+                    help="DenseGait only: deterministically random-subsample "
+                         "to N valid tracklets. Addresses Reviewer 1 R1-3 "
+                         "(disentangle data scale from domain alignment). "
+                         "Default: use the full dataset.")
+    ap.add_argument("--subsample_seed", type=int, default=0,
+                    help="Seed for the DenseGait subsample shuffle. Only used "
+                         "when --subsample_n is set. Default 0.")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
