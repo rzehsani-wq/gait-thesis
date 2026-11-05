@@ -265,7 +265,7 @@ class DenseGaitPoseDataset(Dataset):
 
         clip_normalized = normalize_xy(clip, conf=conf_clip, conf_thr=self.conf_thr)
         # lower threshold for in-the-wild, since in-the-wild pose detections are noisier: we'll lose too many frames at 0.5
-        clip = torch.from_numpy(clip_normalized).float()
+        clip = torch.from_numpy(clip_normalized).float()  # (L, 17, 2)
 
         regions = split_regions(clip)
 
@@ -274,6 +274,7 @@ class DenseGaitPoseDataset(Dataset):
 
         return{
             "folder": str(folder),
+            "xy": clip,                   # full (L, 17, 2) COCO-17 pose for MaskedJointSSL
             "R1": regions["R1"],
             "R2": regions["R2"],
             "meta": meta,
