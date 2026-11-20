@@ -1,8 +1,5 @@
 # Self-Supervised Transformer-Based Gait Recognition Under Clothing Variation
 
-Code and training logs accompanying the MDPI *Electronics* paper of the same
-title (Ehsani, Allili, Alaoui Mhamdi; Bishop's University, 2026).
-
 This codebase implements:
 
 - A pose-based factorized spatial-temporal transformer (~813K parameters) for
@@ -103,21 +100,3 @@ The DenseGait dataset is publicly available as described in
 [Cosma and Rădoi (2022)](https://doi.org/10.3390/s22186803). Preprocessed
 CSVs that index these datasets for this codebase are not committed; see
 `preprocessing_validation.md` for details on the preprocessing pipeline.
-
-## Citation
-
-If you use this code or the paper's results, please cite:
-
-```bibtex
-@article{ehsani2026ssl,
-  title   = {Self-Supervised Transformer-Based Gait Recognition Under Clothing Variation},
-  author  = {Ehsani, Reza and Allili, Madjid and Alaoui Mhamdi, Mohammed Ayoub},
-  journal = {Electronics},
-  year    = {2026},
-  note    = {MDPI, in press}
-}
-```
-
-## License
-
-MIT. See `LICENSE`.
