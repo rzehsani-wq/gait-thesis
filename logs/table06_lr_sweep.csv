@@ -1,0 +1,10 @@
+run_name,tags,seed,init,region,protocol,probe_cond,backbone_lr,head_lr,arc_m,freeze_backbone,view_match,steps,batch_size,ckpt,top1,top5
+std_casia_nm2cl_s0_3e-4,table06,0,casia,R1,standard,cl,0.0003,0.001,0.2,0,0,6000,64,/content/drive/MyDrive/thesis/checkpoints/ssl_casia_standard74.pt,28.677134091319257,54.953979426096375
+sweep_lr1e-03_nm2bg_s0,table06,0,casia,R1,standard,bg,0.001,0.001,0.2,0,0,6000,64,/content/drive/MyDrive/thesis/checkpoints/ssl_casia_standard74.pt,34.54643241305127,62.17282179992829
+sweep_lr1e-03_nm2cl_s0,table06,0,casia,R1,standard,cl,0.001,0.001,0.2,0,0,6000,64,/content/drive/MyDrive/thesis/checkpoints/ssl_casia_standard74.pt,23.587800036094567,46.56199242014077
+sweep_lr1e-03_nm2nm_s0,table06,0,casia,R1,standard,nm,0.001,0.001,0.2,0,0,6000,64,/content/drive/MyDrive/thesis/checkpoints/ssl_casia_standard74.pt,60.285617137028225,84.42706562393744
+sweep_lr1e-04_nm2bg_s0,table02;table05;table06;table10;table11,0,casia,R1,standard,bg,0.0001,0.001,0.2,0,0,6000,64,/content/drive/MyDrive/thesis/checkpoints/ssl_casia_standard74.pt,41.75331660093223,69.25421297956257
+sweep_lr1e-04_nm2cl_s0,table02;table05;table06;table10;table11,0,casia,R1,standard,cl,0.0001,0.001,0.2,0,0,6000,64,/content/drive/MyDrive/thesis/checkpoints/ssl_casia_standard74.pt,33.49575888828731,59.267280274318715
+sweep_lr1e-04_nm2nm_s0,table02;table05;table06;table10;table11,0,casia,R1,standard,nm,0.0001,0.001,0.2,0,0,6000,64,/content/drive/MyDrive/thesis/checkpoints/ssl_casia_standard74.pt,68.08908534512071,91.15946956817409
+sweep_lr3e-04_nm2bg_s0,table06,0,casia,R1,standard,bg,0.0003,0.001,0.2,0,0,6000,64,/content/drive/MyDrive/thesis/checkpoints/ssl_casia_standard74.pt,40.71351738974543,69.77411258515596
+sweep_lr3e-04_nm2nm_s0,table06,0,casia,R1,standard,nm,0.0003,0.001,0.2,0,0,6000,64,/content/drive/MyDrive/thesis/checkpoints/ssl_casia_standard74.pt,68.92213532811968,90.81944916695002
