@@ -1014,6 +1014,11 @@ def run_training(args, device):
     metrics_csv = os.path.join(run_dir, "metrics.csv")
     it = iter(train_loader)
 
+    # --- Per-step training-loss log for the training-dynamics figure
+    train_loss_csv = os.path.join(run_dir, "train_loss.csv")
+    with open(train_loss_csv, "w") as _tf:
+        _tf.write("step,loss\n")
+
     for step in range(1, args.steps + 1):
         try:
             b = next(it)
@@ -1075,7 +1080,9 @@ def run_training(args, device):
                     )
             optim.step()
 
-
+        # Per-step loss log for the training-dynamics figure
+        with open(train_loss_csv, "a") as _tf:
+            _tf.write(f"{step},{float(loss.item()):.6f}\n")
 
         if step % 10 == 0:
             with torch.no_grad():
@@ -1116,7 +1123,28 @@ def run_training(args, device):
                     "top5": top5 if num_classes >= 5 else top1, "num_classes": num_classes
                 })
             else:
-                print(f"[step {step}] standard protocol: no val eval; checkpoint saved to last.pt")
+                # Standard protocol: val_loader is None. Run a monitoring test-set
+                # eval for the training-dynamics figure (NOT used for checkpoint
+                # selection; last.pt remains what the final test eval loads).
+                if test_loader is not None:
+                    featurizer_m = _choose_featurizer(args, metric)
+                    gal_cap_m = args.gallery_per_subject if getattr(args, "gallery_per_subject", 0) > 0 else args.knn_gallery
+                    tmon_top1, tmon_top5 = evaluate_knn(
+                        backbone, test_loader, device, args.region, args.fusion,
+                        gallery_cond=args.gallery_cond, probe_cond=args.probe_cond,
+                        view_match=int(args.knn_view_match),
+                        view_exclude_identical=int(getattr(args, "knn_view_exclude_identical", 0)),
+                        gallery_per_subject=int(gal_cap_m),
+                        rule=args.knn_rule, K=int(args.knn_k), l2norm=bool(args.l2_norm),
+                        featurizer=featurizer_m,
+                    )
+                    print(f"[test-monitor@{step}] top1={tmon_top1:.4f} top5={tmon_top5:.4f}")
+                    append_csv(metrics_csv, {
+                        "step": step, "split": "test_monitor", "top1": tmon_top1,
+                        "top5": tmon_top5, "num_classes": num_classes
+                    })
+                else:
+                    print(f"[step {step}] standard protocol: no val/test eval; checkpoint saved to last.pt")
 
             # ---- checkpointing ----
             ckpt = {
